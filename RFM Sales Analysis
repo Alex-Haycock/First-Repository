@@ -1,0 +1,235 @@
+This repository contains analysis of sales data using the RFM method. I used basic SQL queries and solved more complex problems using SUB QUERY, CTE's, AGGREGATE, and WINOW functions. 
+The skills I learnt were:
+- Importing a file into SQL server database
+- SQL Aggregate functions
+- SQL Window functions
+- SQL Sub Query
+- Common Table Expressions (CTE's)
+- SQL XML Path function
+
+I also created visualisations and dashboards in Tableau using this dataset which can be found at: https://public.tableau.com/app/profile/alex.haycock/vizzes
+
+
+-- Inspecting Data
+select * from [dbo].[sales_data]
+
+-- Checking unique values
+select distinct status from [dbo].[sales_data] -- Six different statuses -- Nice to plot in Tableau
+select distinct YEAR_ID from [dbo].[sales_data] -- From 2003 - 2005
+select distinct PRODUCTLINE from [dbo].[sales_data] -- Seven different products -- Nice to plot in Tableau
+select distinct COUNTRY from [dbo].[sales_data] -- 19 different countries -- Nice to plot in Tableau
+select distinct DEALSIZE from [dbo].[sales_data] -- Three different sizes -- Nice to plot in Tableau
+select distinct TERRITORY from [dbo].[sales_data] -- Four different territories -- Nice to plot in Tableau
+
+-- ANALYSIS
+-- Grouping sales by product line
+select PRODUCTLINE, sum(sales) Revenue
+from [dbo].[sales_data]
+group by PRODUCTLINE
+order by 2 desc
+-- Classic cars and Vintage cars are the top 2 product lines.
+
+-- Grouping sales by year
+select YEAR_ID, sum(sales) Revenue
+from [dbo].[sales_data]
+group by YEAR_ID
+order by 2 desc
+-- 2004 is the year they made the most sales, however 2005 seems to be uncharacteristically small.
+
+select distinct MONTH_ID from [dbo].[sales_data]
+where YEAR_ID = 2005
+-- You can see that the company had only operated for 5 months in 2005, not for the full year like in 2003 and 2004.
+
+--Grouping sales by deal size
+select DEALSIZE, sum(sales) Revenue
+from [dbo].[sales_data]
+group by DEALSIZE
+order by 2 desc
+-- Medium size deals generate the most revenue, followed by small, and then large
+
+-- What was the best month for sales in a specific year? How much was earned that month?
+select MONTH_ID, sum(sales) AS Revenue, count(ORDERNUMBER) Frequency
+from [dbo].[sales_data]
+where YEAR_ID = 2004 -- change year to see the rest
+group by MONTH_ID
+order by 2 desc
+-- In 2003, Novemeber is the best month followed by October for revenue generated. The same applies to 2004, with Novemeber having around double the sales than October as well.
+
+select MONTH_ID, PRODUCTLINE, sum(sales) AS Revenue, count(ORDERNUMBER) Frequency
+from [dbo].[sales_data]
+where YEAR_ID = 2004 and MONTH_ID = 11 -- change year to see the rest
+group by MONTH_ID, PRODUCTLINE
+order by 3 desc
+-- To specify the most successful product in November, the above query will determine this. The most successful product in November is Classic cars in both 2003 and 2004.
+
+-- Who is our best customer? (answered with RFM (Recency-Frequency-Moneatry) analysis)
+select
+	CUSTOMERNAME,
+	sum(sales) AS MonetaryValue,		
+	avg(sales) As AvgMonetaryValue,
+	count(ORDERNUMBER) As Frequency,
+	max(ORDERDATE) As last_order_date,
+	(select max(ORDERDATE) from [dbo].[sales_data]) AS max_order_date,
+	DATEDIFF(DD, max(ORDERDATE), (select max(ORDERDATE) from [dbo].[sales_data])) AS Recency
+from [dbo].[sales_data]
+group by CUSTOMERNAME
+-- Added in a recency column to see how long it had been since customers have placed their last order
+
+-- Now we are grouping the data into quartile, so it is easier to read (bucketing)
+DROP TABLE IF EXISTS #rfm
+;with rfm as 
+(
+	select 
+		CUSTOMERNAME, 
+		sum(sales) MonetaryValue,
+		avg(sales) AvgMonetaryValue,
+		count(ORDERNUMBER) Frequency,
+		max(ORDERDATE) last_order_date,
+		(select max(ORDERDATE) from [dbo].[sales_data]) max_order_date,
+		DATEDIFF(DD, max(ORDERDATE), (select max(ORDERDATE) from [dbo].[sales_data])) Recency
+	from [dbo].[sales_data]
+	group by CUSTOMERNAME
+),
+rfm_calc as 
+(
+
+	select *,
+		NTILE(4) OVER (order by Recency desc) rfm_recency,
+		NTILE(4) OVER (order by Frequency) rfm_frequency,
+		NTILE(4) OVER (order by MonetaryValue) rfm_monetary
+	from rfm AS r
+	)
+	select *, rfm_recency + rfm_frequency + rfm_monetary as rfm_cell,
+	cast(rfm_recency as varchar) + cast(rfm_frequency as varchar) + cast(rfm_monetary as varchar)rfm_cell_string
+	into #rfm
+	from rfm_calc
+	-- By using a CTE (#rfm), I was able to split the customers into quartiles (NTILE). I will then add these quartiles up to categorise how valuable the customers are, and potentially 
+	-- a look towards some needed action.
+
+select * from #rfm
+	
+	select CUSTOMERNAME, rfm_recency, rfm_frequency, rfm_monetary,
+		case
+			when rfm_cell_string in (111, 112, 121, 122, 123, 132, 211, 212, 114, 221) then 'lost customers' -- Lost customers
+			when rfm_cell_string in (133, 134, 143, 244, 334, 343, 344, 144, 234) then 'slipping away, cannot lose' -- (Big spenders who haven't purchased lately) slipping away
+			when rfm_cell_string in (311, 411, 331, 421, 412) then 'new customers' 
+			when rfm_cell_string in (222, 223, 233, 322, 232) then 'potential churners'
+			when rfm_cell_string in (323, 333, 321, 422, 332, 432, 423) then 'active' -- Customers who buy often and recently, but at low price points)
+			when rfm_cell_string in (433, 434, 443, 444) then 'loyal' 
+		end rfm_segment
+		from #rfm;
+	-- Now the customers have been categorised, it is much easier to target advertising campaigns/marketing to the suitable corresponding customers
+
+-- What products are most often sold together?
+-- select * from [dbo].[sales_data] where ORDERNUMBER = 10411
+select ORDERNUMBER
+	from (
+	select ORDERNUMBER, count(*) rn
+	from [dbo].[sales_data]
+	where STATUS = 'Shipped'
+	group by ORDERNUMBER
+	) AS m
+	where rn = 2
+-- This step allows me to see where the order count is 2. In other words, there are 19 orders where only 2 products where purchased.
+
+-- Now, I want to see the product codes for these orders
+select PRODUCTCODE
+from [dbo].[sales_data]
+where ORDERNUMBER in
+	(
+	select ORDERNUMBER
+		from (
+		select ORDERNUMBER, count(*) rn
+		from [dbo].[sales_data]
+		where STATUS = 'Shipped'
+		group by ORDERNUMBER
+		) AS m
+		where rn = 2
+    )
+-- This has come back with 38 results as this query has changed as to where we are searching for the product codes amongst the order numbers, and because rn = 2, 19 order numbers multiplied by 2 product codes = 38 results
+
+-- I will now add a comma in the select phase as to group the product codes on the same row as the their respective order number.
+select ',' + PRODUCTCODE
+from [dbo].[sales_data]
+where ORDERNUMBER in
+	(
+	select ORDERNUMBER
+		from (
+		select ORDERNUMBER, count(*) rn
+		from [dbo].[sales_data]
+		where STATUS = 'Shipped'
+		group by ORDERNUMBER
+		) AS m
+		where rn = 2
+    )
+	for xml path ('')
+-- I converted the results to xml to put them all on a row and spaced by a comma.
+
+-- Now, I want to remove the first comma of the xml by using the STUFF function. This will then convert the results to a string.
+select stuff(
+
+		(select ',' + PRODUCTCODE
+		from [dbo].[sales_data]
+		where ORDERNUMBER in
+			(
+			select ORDERNUMBER
+				from (
+				select ORDERNUMBER, count(*) rn
+				from [dbo].[sales_data]
+				where STATUS = 'Shipped'
+				group by ORDERNUMBER
+				) AS m
+				where rn = 2
+    )
+	for xml path (''))
+	, 1, 1, '')
+-- The first expression in the stuff function would be the previus query as that is what I am looking to convert, then the following section (, 1, 1, '')) relates to what is being changed.
+-- so the first 1 pertains to the starting position, the first comma, the second 1 pertains to how many characters i will extract, and the last argument '' relates to what should replace the extraction (nothing).
+
+
+-- Now I need the order number for the product codes. 
+select ORDERNUMBER, stuff(
+
+		(select ',' + PRODUCTCODE
+		from [dbo].[sales_data] as p
+		where ORDERNUMBER in
+			(
+			select ORDERNUMBER
+				from (
+				select ORDERNUMBER, count(*) rn
+				from [dbo].[sales_data]
+				where STATUS = 'Shipped'
+				group by ORDERNUMBER
+				) AS m
+				where rn = 2
+    )
+	for xml path (''))
+	, 1, 1, '')
+	
+from [dbo].[sales_data] as s
+-- This then showed the entire dataset, so what I need to do now is a join the p and s tables together.
+
+select distinct ORDERNUMBER, stuff(
+
+		(select ',' + PRODUCTCODE
+		from [dbo].[sales_data] as p
+		where ORDERNUMBER in
+			(
+			select ORDERNUMBER
+				from (
+				select ORDERNUMBER, count(*) rn
+				from [dbo].[sales_data]
+				where STATUS = 'Shipped'
+				group by ORDERNUMBER
+				) AS m
+				where rn = 2
+    )
+	and p.ORDERNUMBER = s.ORDERNUMBER
+	for xml path (''))
+	, 1, 1, '') as ProductCodes
+	
+from [dbo].[sales_data] as s
+order by 2 desc
+-- I added the distinct function at the beginning of the query because each product code there is an order number for it.
+-- The order by 2 is used to bring up the orders that have 2 product codes attributed to the order number.
+-- You can see that order 15 and 16 in the results have the same products that were ordered together, as well as 11 and 12.
